@@ -342,6 +342,11 @@ const CONCURRENCY = 16;    // dossiers interrogés en parallèle
 // mesures, pour savoir où passe réellement le temps
 let netCalls = 0, netThrottled = 0, netWaitMs = 0;
 
+// nombre de dossiers dont la lecture a définitivement échoué.
+// Tant qu'il n'est pas nul, l'analyse est incomplète et ne doit
+// servir ni de référence, ni de base pour annoncer des suppressions.
+let lecturesEchouees = 0;
+
 /* Les photos et vidéos sont comptées mais pas listées une par une :
    un dossier d'état des lieux contient des dizaines de clichés sans
    intérêt pour vérifier quels documents sont présents. */
@@ -574,6 +579,7 @@ async function scan(root){
   lines = [];
   stopped = false;
   netCalls = 0; netThrottled = 0; netWaitMs = 0;
+  lecturesEchouees = 0;
 
   const started = Date.now();
   say("Analyse en cours…");
@@ -588,6 +594,10 @@ async function scan(root){
     emit(tree, "");
 
     clearMsg();
+    if(lecturesEchouees > 0){
+      say(lecturesEchouees + " dossier(s) n'ont pas pu être lus. "
+        + "Les chiffres ci-dessous sont incomplets — relancez l'analyse.", "err");
+    }
     if(stopped){
       say("Limite de sécurité atteinte ("+MAX_ITEMS+" éléments). L'architecture affichée est partielle.", "err");
       $("msg-area").innerHTML += "";
@@ -632,9 +642,23 @@ async function crawl(rootNode){
 
       const node = queue[taken++];
 
-      let items = [];
-      try{ items = await childrenOf(node.ref); }
-      catch(e){ items = []; }
+      // Une lecture qui échoue ne doit JAMAIS être confondue avec un
+      // dossier vide : cela ferait croire à la disparition de son contenu.
+      // On réessaie, et si l'échec persiste on le signale.
+      let items = null;
+      for(let essai = 0; essai < 3 && items === null; essai++){
+        try{
+          items = await childrenOf(node.ref);
+        }catch(e){
+          if(essai < 2){
+            await new Promise(r => setTimeout(r, 800 * (essai + 1)));
+          }else{
+            lecturesEchouees++;
+            node.echec = true;
+          }
+        }
+      }
+      if(items === null){ done++; continue; }
 
       const folders = items.filter(estDossier);
       const docs    = items.filter(it => !estDossier(it) && !MEDIA.test(it.name));
@@ -933,6 +957,21 @@ function chemin(p){
 
 async function detecterChangements(tree, nomRacine){
   $("s-diff").classList.remove("hide");
+
+  // Une analyse incomplète ferait apparaître comme "supprimé" tout ce
+  // qui n'a pas pu être lu. On ne compare pas, et surtout on n'enregistre
+  // pas cet état : il deviendrait une référence fausse pour la suite.
+  if(lecturesEchouees > 0){
+    $("diff-body").innerHTML =
+      '<div class="verdict dirty">Analyse incomplète : '
+    + lecturesEchouees + ' dossier(s) n\'ont pas pu être lus '
+    + '(connexion instable). Aucune comparaison n\'est faite et rien '
+    + 'n\'a été enregistré, pour ne pas signaler de fausses suppressions. '
+    + 'Relancez l\'analyse.</div>';
+    diffReport = null;
+    return;
+  }
+
   $("diff-body").innerHTML = '<div class="msg work">Comparaison…</div>';
 
   const apres = inventaire(tree);
