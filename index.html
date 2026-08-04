@@ -347,13 +347,15 @@ let netCalls = 0, netThrottled = 0, netWaitMs = 0;
    intérêt pour vérifier quels documents sont présents. */
 const MEDIA = /\.(jpe?g|png|heic|heif|gif|bmp|tiff?|webp|mov|mp4|avi|m4v|3gp|aae)$/i;
 
-/* Seuls les dossiers de locataires modifiés cette année ou l'an dernier
-   sont explorés : au-delà, le volume deviendrait ingérable avec le temps.
-   Un dossier de locataire se trouve au 4e niveau :
-   racine(1) > immeuble(2) > unité(3) > locataire(4). */
+/* Filtre par année : DÉSACTIVÉ.
+   Il écartait les dossiers de locataires anciens — or un locataire
+   présent depuis plusieurs années a un dossier ancien alors que son
+   bail est en cours. La date ne distingue pas "ancien" de "toujours
+   en cours". Le tri par ancienneté se fera autrement (voir la règle
+   fondée sur l'EDLS : un EDLS vide = locataire encore en place). */
 const NIVEAU_LOCATAIRE = 4;
 const ANNEE_MIN = new Date().getFullYear() - 1;
-let filtreActif = true;
+let filtreActif = false;
 let ignores = 0;
 
 const $ = id => document.getElementById(id);
