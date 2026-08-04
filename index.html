@@ -310,7 +310,7 @@ button.go{background:var(--signal)}
   <section id="s-actions" class="hide">
     <button class="go" id="btn-report">Copier la liste à compléter</button>
     <button class="ghost" id="btn-copy">Copier l'architecture</button>
-    <button class="ghost" id="btn-again">Analyser un autre dossier</button>
+    <button class="ghost" id="btn-again">Lancer une analyse complète</button>
     <button class="ghost" id="btn-logout2">Se déconnecter</button>
   </section>
 
@@ -674,6 +674,13 @@ async function scan(root){
   try{
     await reperDossierApp();
 
+    racineRef = refDe(root);
+    racineNom = root.name;
+    // jeton pris AVANT l'analyse : un changement survenu pendant
+    // l'analyse sera vu à la prochaine ouverture, pas perdu
+    try{ deltaLink = await jetonDeDepart(racineRef); }
+    catch(e){ deltaLink = null; }
+
     passage = 1;
     const p1 = await unPassage(root);
     if(p1.manque){
@@ -788,6 +795,7 @@ async function crawl(rootNode){
 
       node.medias = medias.length;
       node.docs   = docs.map(d => d.name);
+      node.mediaIds = medias.map(m => refDe(m, node.ref.driveId).id);
       stats.photos += medias.length;
       stats.files  += docs.length;
       if(node.depth > stats.deepest) stats.deepest = node.depth;
@@ -818,7 +826,9 @@ async function crawl(rootNode){
         // ne jamais abandonner un dossier en silence : on le compte
         tropProfonds += folders.length;
       }
-      docs.forEach(d => node.children.push({ name:d.name }));
+      docs.forEach(d => node.children.push({
+        name: d.name, id: refDe(d, node.ref.driveId).id
+      }));
 
       if(stats.folders + stats.files >= MAX_ITEMS) stopped = true;
 
@@ -874,7 +884,8 @@ function render(seconds){
      '<div class="stat"><b>'+stats.folders+'</b><span>Dossiers</span></div>'
    + '<div class="stat"><b>'+stats.files+'</b><span>Documents</span></div>'
    + '<div class="stat"><b>'+stats.photos+'</b><span>Photos</span></div>'
-   + '<div class="stat"><b>'+seconds+'s</b><span>Durée</span></div>';
+   + '<div class="stat"><b>' + (seconds === "—" ? "—" : seconds + "s")
+   + '</b><span>' + (seconds === "—" ? "Mémoire" : "Durée") + '</span></div>';
 
   const html = lines.map(l => {
     const draw = l.match(/^[\s│├└─]*/)[0];
@@ -1114,132 +1125,341 @@ function chemin(p){
 async function detecterChangements(tree, nomRacine){
   $("s-diff").classList.remove("hide");
 
-  // Une analyse incomplète ferait apparaître comme "supprimé" tout ce
-  // qui n'a pas pu être lu. On ne compare pas, et surtout on n'enregistre
-  // pas cet état : il deviendrait une référence fausse pour la suite.
   const manque = raisonIncomplete();
   if(manque){
     $("diff-body").innerHTML =
       '<div class="verdict dirty">Analyse incomplète : ' + escapeHtml(manque)
-    + '. Aucune comparaison n\'est faite et rien n\'a été enregistré, pour ne '
-    + 'pas signaler de fausses suppressions. Relancez l\'analyse.</div>';
-    diffReport = null;
+    + '. Rien n\'a été enregistré. Relancez l\'analyse.</div>';
     return;
   }
 
-  $("diff-body").innerHTML = '<div class="msg work">Comparaison…</div>';
-
-  const apres = inventaire(tree);
-  const etat = {
-    date: new Date().toISOString(),
-    racine: nomRacine,
-    documents: apres.documents,
-    photos: apres.photos
-  };
-
-  let avant = null;
+  // l'analyse complète sert de nouveau point de départ
+  cartes = cartesDepuisArbre(tree);
   try{
-    avant = await lireEtat();
+    await ecrireEtat(etatCourant(nomRacine));
+    $("diff-body").innerHTML =
+      '<div class="verdict clean">Point de départ enregistré. À la prochaine '
+    + 'ouverture de VeroS, les changements s\'afficheront en quelques secondes, '
+    + 'sans relire l\'ensemble.</div>';
   }catch(err){
     $("diff-body").innerHTML =
       '<div class="msg err">' + escapeHtml(err.message) + '</div>';
-    return;
   }
+}
 
-  // première analyse : on pose la référence, rien à comparer
-  if(!avant || !avant.documents){
-    try{
-      await ecrireEtat(etat);
-      $("diff-body").innerHTML =
-        '<div class="verdict clean">Première analyse. L\'état actuel a été '
-      + 'enregistré dans OneDrive (dossier Applications / VeroS, fichier '
-      + 'veros-etat.json). Les prochaines analyses signaleront les documents '
-      + 'et photos ajoutés ou supprimés.</div>';
-    }catch(err){
-      $("diff-body").innerHTML =
-        '<div class="msg err">' + escapeHtml(err.message) + '</div>';
+function etatCourant(nom){
+  return {
+    v: 2,
+    date: new Date().toISOString(),
+    racine: nom || racineNom,
+    ref: racineRef,
+    deltaLink: deltaLink,
+    dossiers: cartes.dossiers,
+    docs: cartes.docs
+  };
+}
+
+
+/* =========================================================
+   MOTEUR DELTA
+   Au lieu de relire les 883 dossiers et de comparer deux
+   photographies, on demande à Microsoft ce qui a changé.
+   Les suppressions sont déclarées explicitement : une lecture
+   manquée ne peut plus ressembler à une disparition.
+   ========================================================= */
+
+// Mémoire locale : uniquement les dossiers et les documents.
+// Les photos ne sont pas mémorisées une par une (18 000 entrées) :
+// on garde leur nombre par dossier, et on recompte le dossier
+// concerné quand delta signale un mouvement à l'intérieur.
+let cartes = null;   // { dossiers: {id:{nom,parent,photos}}, docs: {id:{nom,parent}} }
+let deltaLink = null;
+let racineRef = null, racineNom = "";
+
+function cartesDepuisArbre(tree){
+  const dossiers = {}, docs = {};
+  (function parcours(node, parent){
+    dossiers[node.ref.id] = {
+      nom: node.name, parent: parent, photos: node.medias || 0
+    };
+    node.children.forEach(k => {
+      if(k.children) parcours(k, node.ref.id);
+      else if(k.id) docs[k.id] = { nom: k.name, parent: node.ref.id };
+    });
+  })(tree, null);
+  return { dossiers: dossiers, docs: docs };
+}
+
+// Chemin lisible d'un élément, reconstruit en remontant les parents
+function cheminDe(parentId, cartes){
+  const bouts = [];
+  let id = parentId, garde = 0;
+  while(id && cartes.dossiers[id] && garde++ < 40){
+    bouts.unshift(cartes.dossiers[id].nom);
+    id = cartes.dossiers[id].parent;
+  }
+  return bouts.join(" / ");
+}
+
+// Reconstruit un arbre à partir de la mémoire locale, pour
+// réutiliser l'affichage et le contrôle des états des lieux
+function arbreDepuisCartes(c){
+  const noeuds = {};
+  Object.keys(c.dossiers).forEach(id => {
+    const d = c.dossiers[id];
+    noeuds[id] = { name:d.nom, ref:{id:id}, children:[], medias:d.photos, docs:[] };
+  });
+  let racine = null;
+  Object.keys(c.dossiers).forEach(id => {
+    const p = c.dossiers[id].parent;
+    if(p && noeuds[p]) noeuds[p].children.push(noeuds[id]);
+    else racine = noeuds[id];
+  });
+  Object.keys(c.docs).forEach(id => {
+    const d = c.docs[id];
+    if(noeuds[d.parent]){
+      noeuds[d.parent].children.push({ name:d.nom, id:id });
+      noeuds[d.parent].docs.push(d.nom);
     }
-    diffReport = null;
+  });
+  // chemins complets
+  (function chemine(n, prefixe){
+    n.path = prefixe ? prefixe + " / " + n.name : n.name;
+    n.children.forEach(k => { if(k.children) chemine(k, n.path); });
+  })(racine, null);
+  return racine;
+}
+
+// Jeton de départ : on le prend AVANT l'analyse complète, pour
+// qu'un changement survenu pendant l'analyse soit vu au prochain coup
+async function jetonDeDepart(ref){
+  const base = ref.driveId
+    ? "/drives/" + ref.driveId + "/items/" + ref.id + "/delta?token=latest"
+    : "/me/drive/items/" + ref.id + "/delta?token=latest";
+  const r = await graph(base);
+  return r["@odata.deltaLink"] || null;
+}
+
+/* Récupère les changements. Renvoie null si Microsoft demande une
+   resynchronisation complète (erreur 410) — cas prévu et rare. */
+async function lireDelta(lien){
+  const items = [];
+  let url = lien;
+  while(url){
+    const rep = await fetch(url, {
+      cache:"no-store",
+      headers:{ Authorization: "Bearer " + token() }
+    });
+    if(rep.status === 410) return null;          // resynchronisation exigée
+    if(rep.status === 401){
+      if(await rafraichirJeton()) continue;
+      throw new Error("Session expirée. Reconnectez-vous.");
+    }
+    if(!rep.ok) throw new Error("Erreur Microsoft " + rep.status);
+    const page = await rep.json();
+    (page.value || []).forEach(it => items.push(it));
+    if(page["@odata.nextLink"]){ url = page["@odata.nextLink"]; }
+    else { deltaLink = page["@odata.deltaLink"] || lien; url = null; }
+  }
+  return items;
+}
+
+/* Applique les changements à la mémoire locale et en dresse la liste. */
+async function appliquerDelta(items){
+  const ajDoc = [], suDoc = [], dossiersARecompter = new Set();
+  const suDossier = [], ajDossier = [];
+
+  items.forEach(it => {
+    const id = it.id;
+    const parent = it.parentReference ? it.parentReference.id : null;
+
+    if(it.deleted){
+      if(cartes.docs[id]){
+        suDoc.push({ nom: cartes.docs[id].nom,
+                     ou: cheminDe(cartes.docs[id].parent, cartes) });
+        delete cartes.docs[id];
+      }else if(cartes.dossiers[id]){
+        suDossier.push(cheminDe(id, cartes));
+        delete cartes.dossiers[id];
+      }else if(parent && cartes.dossiers[parent]){
+        // c'était une photo : on recomptera ce dossier
+        dossiersARecompter.add(parent);
+      }
+      return;
+    }
+
+    if(it.folder){
+      if(!cartes.dossiers[id]){
+        cartes.dossiers[id] = { nom: it.name, parent: parent, photos: 0 };
+        ajDossier.push(cheminDe(id, cartes));
+      }else{
+        cartes.dossiers[id].nom = it.name;
+        cartes.dossiers[id].parent = parent;
+      }
+      return;
+    }
+
+    if(it.file || it.name){
+      if(MEDIA.test(it.name)){
+        if(parent) dossiersARecompter.add(parent);
+      }else{
+        if(!cartes.docs[id]){
+          cartes.docs[id] = { nom: it.name, parent: parent };
+          ajDoc.push({ nom: it.name, ou: cheminDe(parent, cartes) });
+        }else{
+          cartes.docs[id].nom = it.name;
+          cartes.docs[id].parent = parent;
+        }
+      }
+    }
+  });
+
+  // recomptage ciblé des dossiers dont les photos ont bougé
+  const ajPho = [], suPho = [];
+  for(const fid of dossiersARecompter){
+    if(!cartes.dossiers[fid]) continue;
+    let items2 = null;
+    for(let e = 0; e < 3 && items2 === null; e++){
+      try{ items2 = await childrenOf({ driveId: racineRef.driveId, id: fid }); }
+      catch(err){ if(e === 2) throw new Error("Recomptage impossible d'un dossier."); }
+    }
+    const n = items2.filter(x => !estDossier(x) && MEDIA.test(x.name)).length;
+    const v = cartes.dossiers[fid].photos || 0;
+    if(n > v) ajPho.push({ nb:n - v, ou: cheminDe(fid, cartes) });
+    if(n < v) suPho.push({ nb:v - n, ou: cheminDe(fid, cartes) });
+    cartes.dossiers[fid].photos = n;
+  }
+
+  return { ajDoc, suDoc, ajDossier, suDossier, ajPho, suPho,
+           total: ajDoc.length + suDoc.length + ajDossier.length
+                + suDossier.length + ajPho.length + suPho.length };
+}
+
+/* ---------- écran d'ouverture : les changements en quelques secondes ---------- */
+
+async function ouverture(){
+  $("s-login").classList.add("hide");
+  $("s-pick").classList.add("hide");
+  $("s-tree").classList.add("hide");
+  $("s-check").classList.add("hide");
+  $("s-actions").classList.add("hide");
+  $("s-diff").classList.remove("hide");
+  $("diff-body").innerHTML = '<div class="msg work">Recherche des changements…</div>';
+
+  let etat = null;
+  try{ etat = await lireEtat(); }catch(e){ etat = null; }
+
+  // aucun point de départ : il faut une analyse complète d'abord
+  if(!etat || etat.v !== 2 || !etat.deltaLink || !etat.dossiers){
+    $("diff-body").innerHTML =
+      '<div class="msg work">Aucun point de départ enregistré. Lancez une '
+    + 'analyse complète : ensuite, les changements s\'afficheront à chaque '
+    + 'ouverture en quelques secondes.</div>';
+    $("s-diff").classList.add("hide");
+    showPicker();
     return;
   }
 
-  const d = comparer(avant, apres);
+  cartes    = { dossiers: etat.dossiers, docs: etat.docs };
+  deltaLink = etat.deltaLink;
+  racineRef = etat.ref;
+  racineNom = etat.racine;
 
-  // Garde-fou : une disparition massive n'arrive jamais dans la vraie
-  // vie. C'est presque toujours le signe d'une lecture incomplète. On
-  // affiche le résultat mais on n'enregistre rien tant que ce n'est pas
-  // confirmé par une seconde analyse.
-  const nbAvant = Object.keys(avant.documents).length;
-  const perteDoc = nbAvant ? d.suDoc.length / nbAvant : 0;
-  const phAvant = Object.values(avant.photos).reduce((a,b)=>a+b, 0);
-  const phPerdues = d.suPho.reduce((a,x)=>a+x.nb, 0);
-  const pertePho = phAvant ? phPerdues / phAvant : 0;
-  const suspect = (d.suDoc.length >= 10 && perteDoc > 0.20)
-               || (phPerdues >= 200 && pertePho > 0.20);
+  let items;
+  try{ items = await lireDelta(deltaLink); }
+  catch(err){
+    $("diff-body").innerHTML = '<div class="msg err">' + escapeHtml(err.message) + '</div>';
+    return;
+  }
 
-  diffReport = { d:d, depuis:avant.date };
+  // Microsoft a invalidé le jeton : repli sur l'analyse complète
+  if(items === null){
+    $("diff-body").innerHTML =
+      '<div class="verdict dirty">Microsoft demande une remise à niveau '
+    + 'complète (le suivi des changements a été réinitialisé de son côté). '
+    + 'Lancez une analyse complète.</div>';
+    showPicker();
+    return;
+  }
 
-  const quand = new Date(avant.date).toLocaleString("fr-BE",
+  let ch;
+  try{ ch = await appliquerDelta(items); }
+  catch(err){
+    $("diff-body").innerHTML = '<div class="msg err">' + escapeHtml(err.message)
+      + ' Lancez une analyse complète.</div>';
+    showPicker();
+    return;
+  }
+
+  const quand = new Date(etat.date).toLocaleString("fr-BE",
     { day:"numeric", month:"long", year:"numeric", hour:"2-digit", minute:"2-digit" });
 
   let html = "";
-
-  if(!d.total){
+  if(!ch.total){
     html = '<div class="verdict clean">Aucun changement depuis le '
          + escapeHtml(quand) + '.</div>';
   }else{
-    html = '<div class="verdict dirty">' + d.total
+    html = '<div class="verdict dirty">' + ch.total
          + ' changement(s) depuis le ' + escapeHtml(quand) + '.</div>';
 
-    d.ajDoc.forEach(p => {
-      const i = p.lastIndexOf(" / ");
+    ch.ajDoc.forEach(x => {
       html += '<div class="chg plus"><div class="quoi">+ Document ajouté</div>'
-            + '<div class="ou">' + escapeHtml(p.slice(i + 3)) + '<br>'
-            + escapeHtml(chemin(p.slice(0, i))) + '</div></div>';
+            + '<div class="ou">' + escapeHtml(x.nom) + '<br>'
+            + escapeHtml(x.ou) + '</div></div>';
     });
-
-    d.suDoc.forEach(p => {
-      const i = p.lastIndexOf(" / ");
+    ch.suDoc.forEach(x => {
       html += '<div class="chg moins"><div class="quoi">− Document supprimé</div>'
-            + '<div class="ou">' + escapeHtml(p.slice(i + 3)) + '<br>'
-            + escapeHtml(chemin(p.slice(0, i))) + '</div></div>';
+            + '<div class="ou">' + escapeHtml(x.nom) + '<br>'
+            + escapeHtml(x.ou) + '</div></div>';
     });
-
-    d.ajPho.forEach(x => {
+    ch.ajPho.forEach(x => {
       html += '<div class="chg plus"><div class="quoi">+ ' + x.nb
             + (x.nb > 1 ? ' photos ajoutées' : ' photo ajoutée') + '</div>'
-            + '<div class="ou">' + escapeHtml(chemin(x.dossier)) + '</div></div>';
+            + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
     });
-
-    d.suPho.forEach(x => {
+    ch.suPho.forEach(x => {
       html += '<div class="chg moins"><div class="quoi">− ' + x.nb
             + (x.nb > 1 ? ' photos supprimées' : ' photo supprimée') + '</div>'
-            + '<div class="ou">' + escapeHtml(chemin(x.dossier)) + '</div></div>';
+            + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
+    });
+    ch.ajDossier.forEach(p => {
+      html += '<div class="chg plus"><div class="quoi">+ Dossier créé</div>'
+            + '<div class="ou">' + escapeHtml(p) + '</div></div>';
+    });
+    ch.suDossier.forEach(p => {
+      html += '<div class="chg moins"><div class="quoi">− Dossier supprimé</div>'
+            + '<div class="ou">' + escapeHtml(p) + '</div></div>';
     });
   }
-
-  if(suspect){
-    html = '<div class="verdict dirty">Résultat suspect : '
-         + d.suDoc.length + ' document(s) et ' + phPerdues + ' photo(s) '
-         + 'semblent avoir disparu d\'un coup. C\'est presque toujours le signe '
-         + 'd\'une lecture incomplète, pas d\'une vraie suppression. '
-         + 'Rien n\'a été enregistré. Relancez l\'analyse : si le résultat est '
-         + 'identique, la suppression est réelle.</div>' + html;
-    $("diff-body").innerHTML = html;
-    return;
-  }
-
-  try{
-    // on conserve l'état précédent en second fichier : en cas de mauvaise
-    // écriture, il reste un point de repère récupérable
-    await ecrireEtat(avant, ETAT_SECOURS).catch(()=>{});
-    await ecrireEtat(etat);
-  }catch(err){
-    html += '<div class="msg err">Changements affichés, mais le nouvel état '
-          + 'n\'a pas pu être enregistré : ' + escapeHtml(err.message) + '</div>';
-  }
-
   $("diff-body").innerHTML = html;
+
+  // contrôle des états des lieux + arborescence, à jour, sans relire OneDrive
+  try{
+    const arbre = arbreDepuisCartes(cartes);
+
+    lines = [];
+    lines.push(arbre.name + "/");
+    emit(arbre, "");
+    stats = { folders:0, files:0, photos:0, deepest:0 };
+    Object.keys(cartes.dossiers).forEach(id => {
+      stats.folders++;
+      stats.photos += cartes.dossiers[id].photos || 0;
+    });
+    stats.folders--;                       // la racine n'est pas un sous-dossier
+    stats.files = Object.keys(cartes.docs).length;
+    $("s-tree").classList.remove("hide");
+    $("msg-area").innerHTML =
+      '<div class="msg work" style="font-size:11px">Affiché depuis la mémoire '
+    + 'de l\'application, sans relire OneDrive.</div>';
+    render("—");
+
+    checkEDL(arbre);
+  }catch(e){}
+
+  // mémoire mise à jour
+  if(ch.total){ try{ await ecrireEtat(etatCourant()); }catch(e){} }
+
+  $("s-actions").classList.remove("hide");
 }
 
 /* ---------- copie ---------- */
@@ -1306,7 +1526,7 @@ async function copyTree(){
     try{
       await exchangeCode(params.get("code"));
       history.replaceState({}, "", REDIRECT);
-      showPicker();
+      ouverture();
     }catch(err){
       $("s-login").innerHTML =
         '<h2>Connexion</h2><div class="msg err">'+escapeHtml(err.message)+'</div>'
@@ -1331,7 +1551,7 @@ async function copyTree(){
     return;
   }
 
-  if(token()) showPicker();
+  if(token()) ouverture();
 })();
 </script>
 </body>
