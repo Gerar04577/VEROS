@@ -383,9 +383,23 @@ function clearMsg(){ $("msg-area").innerHTML = ""; }
 
 /* ---------- jetons ---------- */
 function token(){ return sessionStorage.getItem("veros_token"); }
-function setToken(t){ sessionStorage.setItem("veros_token", t); }
+
+function setToken(t){
+  sessionStorage.setItem("veros_token", t);
+  // on mémorise les permissions obtenues avec ce jeton : si l'application
+  // en réclame de nouvelles plus tard, il faudra redemander l'accord.
+  sessionStorage.setItem("veros_scopes", SCOPES);
+}
+
+// Un jeton obtenu avant l'ajout d'une permission ne la contient pas.
+// Le réutiliser conduirait à des refus d'écriture inexplicables.
+function jetonPerime(){
+  return token() && sessionStorage.getItem("veros_scopes") !== SCOPES;
+}
+
 function forget(){
   sessionStorage.removeItem("veros_token");
+  sessionStorage.removeItem("veros_scopes");
   sessionStorage.removeItem("veros_verifier");
   location.href = REDIRECT;
 }
@@ -799,7 +813,13 @@ async function ecrireEtat(etat){
   });
   if(!r.ok){
     const e = await r.json().catch(()=>({}));
-    throw new Error((e.error && e.error.message) || ("Écriture impossible ("+r.status+")"));
+    const detail = (e.error && e.error.message) || "";
+    if(r.status === 403 || r.status === 401){
+      throw new Error("Écriture refusée par Microsoft (" + r.status + "). "
+        + "L'autorisation d'écriture dans le dossier de l'application n'a pas "
+        + "été accordée. Déconnectez-vous puis reconnectez-vous. " + detail);
+    }
+    throw new Error("Écriture impossible (" + r.status + "). " + detail);
   }
   return r.json();
 }
@@ -878,8 +898,9 @@ async function detecterChangements(tree, nomRacine){
       await ecrireEtat(etat);
       $("diff-body").innerHTML =
         '<div class="verdict clean">Première analyse. L\'état actuel a été '
-      + 'enregistré comme référence : les prochaines analyses signaleront '
-      + 'les documents et photos ajoutés ou supprimés.</div>';
+      + 'enregistré dans OneDrive (dossier Applications / VeroS, fichier '
+      + 'veros-etat.json). Les prochaines analyses signaleront les documents '
+      + 'et photos ajoutés ou supprimés.</div>';
     }catch(err){
       $("diff-body").innerHTML =
         '<div class="msg err">' + escapeHtml(err.message) + '</div>';
@@ -1011,6 +1032,21 @@ async function copyTree(){
         + '<button id="retry">Réessayer</button>';
       $("retry").onclick = () => location.href = REDIRECT;
     }
+    return;
+  }
+
+  // un jeton obtenu avant l'ajout d'une permission ne l'inclut pas :
+  // on repart d'une connexion neuve plutôt que d'échouer à l'écriture
+  if(jetonPerime()){
+    sessionStorage.removeItem("veros_token");
+    sessionStorage.removeItem("veros_scopes");
+    $("s-login").innerHTML =
+      '<h2>Connexion</h2>'
+    + '<div class="msg work">VeroS a besoin d\'une nouvelle autorisation '
+    + 'pour enregistrer l\'état des documents dans OneDrive. '
+    + 'Reconnectez-vous : Microsoft vous demandera votre accord.</div>'
+    + '<button id="btn-relogin">Se connecter à OneDrive</button>';
+    $("btn-relogin").onclick = login;
     return;
   }
 
