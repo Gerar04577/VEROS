@@ -546,6 +546,7 @@ async function scan(root){
   say("Analyse en cours…");
 
   try{
+    await reperDossierApp();
     const tree = { name: root.name, id: root.id, children: [],
                    medias: 0, docs: [], depth: 1, path: root.name };
     await crawl(tree);
@@ -614,6 +615,10 @@ async function crawl(rootNode){
 
       if(node.depth < MAX_DEPTH){
         folders.forEach(f => {
+          // le dossier de l'application ne fait pas partie des documents
+          // de gestion : on ne le compte pas et on n'y descend pas
+          if(dossierAppId && f.id === dossierAppId) return;
+
           // filtre par année, appliqué au niveau du dossier de locataire
           if(filtreActif && node.depth + 1 === NIVEAU_LOCATAIRE){
             const an = f.lastModifiedDateTime
@@ -638,7 +643,9 @@ async function crawl(rootNode){
       if(done % 10 === 0){
         say("Analyse en cours… " + done + " / " + queue.length + " dossiers, "
             + stats.files + " documents, " + netCalls + " appels réseau"
-            + (netThrottled ? " (" + netThrottled + " ralentissements)" : ""));
+            + (netThrottled ? " (" + netThrottled + " ralentissements)" : "")
+            + "<br>Laissez cet écran affiché : iOS met l'analyse en veille "
+            + "si vous passez à une autre application.");
       }
     }
   }
@@ -786,6 +793,21 @@ function checkEDL(tree){
   $("check-body").innerHTML = html;
 }
 
+/* L'application range son fichier d'état dans son propre dossier.
+   Si ce dossier a été déplacé dans le dossier analysé, il ne doit pas
+   être compté ni signalé comme un changement : ce serait l'application
+   qui se détecte elle-même. */
+let dossierAppId = null;
+
+async function reperDossierApp(){
+  try{
+    const r = await fetch(GRAPH + "/me/drive/special/approot?$select=id", {
+      headers:{ Authorization: "Bearer " + token() }
+    });
+    if(r.ok){ dossierAppId = (await r.json()).id; }
+  }catch(e){ /* sans gravité : au pire le dossier apparaît dans l'arbre */ }
+}
+
 /* ---------- état conservé dans OneDrive ---------- */
 
 // Lecture de l'état précédent. Absent la première fois : ce n'est pas
@@ -840,10 +862,14 @@ function inventaire(node, doc, pho){
 function comparer(avant, apres){
   const ajDoc = [], suDoc = [], ajPho = [], suPho = [];
 
-  Object.keys(apres.documents).forEach(p => {
+  // le fichier d'état de l'application n'est pas un document de gestion :
+  // il est ignoré, y compris s'il figure dans un état enregistré autrefois
+  const propre = p => !p.endsWith("veros-etat.json");
+
+  Object.keys(apres.documents).filter(propre).forEach(p => {
     if(!avant.documents[p]) ajDoc.push(p);
   });
-  Object.keys(avant.documents).forEach(p => {
+  Object.keys(avant.documents).filter(propre).forEach(p => {
     if(!apres.documents[p]) suDoc.push(p);
   });
 
