@@ -676,11 +676,6 @@ async function scan(root){
 
     racineRef = refDe(root);
     racineNom = root.name;
-    // jeton pris AVANT l'analyse : un changement survenu pendant
-    // l'analyse sera vu à la prochaine ouverture, pas perdu
-    try{ deltaLink = await jetonDeDepart(racineRef); }
-    catch(e){ deltaLink = null; }
-
     passage = 1;
     const p1 = await unPassage(root);
     if(p1.manque){
@@ -1133,18 +1128,34 @@ async function detecterChangements(tree, nomRacine){
     return;
   }
 
-  // l'analyse complète sert de nouveau point de départ
-  cartes = cartesDepuisArbre(tree);
+  const nouvelles = cartesDepuisArbre(tree);
+
+  // état précédent, s'il existe
+  let avant = null;
+  try{ avant = await lireEtat(); }catch(e){ avant = null; }
+
+  let html;
+  if(avant && avant.dossiers && Object.keys(avant.dossiers).length){
+    const ch = comparerCartes(
+      { dossiers: avant.dossiers, docs: avant.docs || {} },
+      nouvelles
+    );
+    const quand = new Date(avant.date).toLocaleString("fr-BE",
+      { day:"numeric", month:"long", year:"numeric", hour:"2-digit", minute:"2-digit" });
+    html = htmlChangements(ch, quand);
+  }else{
+    html = '<div class="verdict clean">Première analyse enregistrée. '
+         + 'La prochaine analyse indiquera ce qui a changé entre-temps.</div>';
+  }
+
+  cartes = nouvelles;
   try{
     await ecrireEtat(etatCourant(nomRacine));
-    $("diff-body").innerHTML =
-      '<div class="verdict clean">Point de départ enregistré. À la prochaine '
-    + 'ouverture de VeroS, les changements s\'afficheront en quelques secondes, '
-    + 'sans relire l\'ensemble.</div>';
   }catch(err){
-    $("diff-body").innerHTML =
-      '<div class="msg err">' + escapeHtml(err.message) + '</div>';
+    html += '<div class="msg err">Changements affichés, mais l\'état n\'a pas '
+          + 'pu être enregistré : ' + escapeHtml(err.message) + '</div>';
   }
+  $("diff-body").innerHTML = html;
 }
 
 function etatCourant(nom){
@@ -1153,7 +1164,6 @@ function etatCourant(nom){
     date: new Date().toISOString(),
     racine: nom || racineNom,
     ref: racineRef,
-    deltaLink: deltaLink,
     dossiers: cartes.dossiers,
     docs: cartes.docs
   };
@@ -1173,7 +1183,6 @@ function etatCourant(nom){
 // on garde leur nombre par dossier, et on recompte le dossier
 // concerné quand delta signale un mouvement à l'intérieur.
 let cartes = null;   // { dossiers: {id:{nom,parent,photos}}, docs: {id:{nom,parent}} }
-let deltaLink = null;
 let racineRef = null, racineNom = "";
 
 function cartesDepuisArbre(tree){
@@ -1230,110 +1239,14 @@ function arbreDepuisCartes(c){
   return racine;
 }
 
-// Jeton de départ : on le prend AVANT l'analyse complète, pour
-// qu'un changement survenu pendant l'analyse soit vu au prochain coup
-async function jetonDeDepart(ref){
-  const base = ref.driveId
-    ? "/drives/" + ref.driveId + "/items/" + ref.id + "/delta?token=latest"
-    : "/me/drive/items/" + ref.id + "/delta?token=latest";
-  const r = await graph(base);
-  return r["@odata.deltaLink"] || null;
-}
+/* Jeton de départ.
+   IMPORTANT : delta ne fonctionne QUE sur la racine du OneDrive.
+   Appelée sur un sous-dossier, la requête ne remonte rien — sans
+   erreur. On interroge donc la racine et on filtre ensuite sur le
+   dossier surveillé. */
 
 /* Récupère les changements. Renvoie null si Microsoft demande une
    resynchronisation complète (erreur 410) — cas prévu et rare. */
-async function lireDelta(lien){
-  const items = [];
-  let url = lien;
-  while(url){
-    const rep = await fetch(url, {
-      cache:"no-store",
-      headers:{ Authorization: "Bearer " + token() }
-    });
-    if(rep.status === 410) return null;          // resynchronisation exigée
-    if(rep.status === 401){
-      if(await rafraichirJeton()) continue;
-      throw new Error("Session expirée. Reconnectez-vous.");
-    }
-    if(!rep.ok) throw new Error("Erreur Microsoft " + rep.status);
-    const page = await rep.json();
-    (page.value || []).forEach(it => items.push(it));
-    if(page["@odata.nextLink"]){ url = page["@odata.nextLink"]; }
-    else { deltaLink = page["@odata.deltaLink"] || lien; url = null; }
-  }
-  return items;
-}
-
-/* Applique les changements à la mémoire locale et en dresse la liste. */
-async function appliquerDelta(items){
-  const ajDoc = [], suDoc = [], dossiersARecompter = new Set();
-  const suDossier = [], ajDossier = [];
-
-  items.forEach(it => {
-    const id = it.id;
-    const parent = it.parentReference ? it.parentReference.id : null;
-
-    if(it.deleted){
-      if(cartes.docs[id]){
-        suDoc.push({ nom: cartes.docs[id].nom,
-                     ou: cheminDe(cartes.docs[id].parent, cartes) });
-        delete cartes.docs[id];
-      }else if(cartes.dossiers[id]){
-        suDossier.push(cheminDe(id, cartes));
-        delete cartes.dossiers[id];
-      }else if(parent && cartes.dossiers[parent]){
-        // c'était une photo : on recomptera ce dossier
-        dossiersARecompter.add(parent);
-      }
-      return;
-    }
-
-    if(it.folder){
-      if(!cartes.dossiers[id]){
-        cartes.dossiers[id] = { nom: it.name, parent: parent, photos: 0 };
-        ajDossier.push(cheminDe(id, cartes));
-      }else{
-        cartes.dossiers[id].nom = it.name;
-        cartes.dossiers[id].parent = parent;
-      }
-      return;
-    }
-
-    if(it.file || it.name){
-      if(MEDIA.test(it.name)){
-        if(parent) dossiersARecompter.add(parent);
-      }else{
-        if(!cartes.docs[id]){
-          cartes.docs[id] = { nom: it.name, parent: parent };
-          ajDoc.push({ nom: it.name, ou: cheminDe(parent, cartes) });
-        }else{
-          cartes.docs[id].nom = it.name;
-          cartes.docs[id].parent = parent;
-        }
-      }
-    }
-  });
-
-  // recomptage ciblé des dossiers dont les photos ont bougé
-  const ajPho = [], suPho = [];
-  for(const fid of dossiersARecompter){
-    if(!cartes.dossiers[fid]) continue;
-    let items2 = null;
-    for(let e = 0; e < 3 && items2 === null; e++){
-      try{ items2 = await childrenOf({ driveId: racineRef.driveId, id: fid }); }
-      catch(err){ if(e === 2) throw new Error("Recomptage impossible d'un dossier."); }
-    }
-    const n = items2.filter(x => !estDossier(x) && MEDIA.test(x.name)).length;
-    const v = cartes.dossiers[fid].photos || 0;
-    if(n > v) ajPho.push({ nb:n - v, ou: cheminDe(fid, cartes) });
-    if(n < v) suPho.push({ nb:v - n, ou: cheminDe(fid, cartes) });
-    cartes.dossiers[fid].photos = n;
-  }
-
-  return { ajDoc, suDoc, ajDossier, suDossier, ajPho, suPho,
-           total: ajDoc.length + suDoc.length + ajDossier.length
-                + suDossier.length + ajPho.length + suPho.length };
-}
 
 /* ---------- écran d'ouverture : les changements en quelques secondes ---------- */
 
@@ -1344,122 +1257,125 @@ async function ouverture(){
   $("s-check").classList.add("hide");
   $("s-actions").classList.add("hide");
   $("s-diff").classList.remove("hide");
-  $("diff-body").innerHTML = '<div class="msg work">Recherche des changements…</div>';
+  $("diff-body").innerHTML = '<div class="msg work">Chargement…</div>';
 
   let etat = null;
   try{ etat = await lireEtat(); }catch(e){ etat = null; }
 
-  // aucun point de départ : il faut une analyse complète d'abord
-  if(!etat || etat.v !== 2 || !etat.deltaLink || !etat.dossiers){
+  // rien en mémoire : il faut une première analyse
+  if(!etat || !etat.dossiers || !Object.keys(etat.dossiers).length){
     $("diff-body").innerHTML =
-      '<div class="msg work">Aucun point de départ enregistré. Lancez une '
-    + 'analyse complète : ensuite, les changements s\'afficheront à chaque '
-    + 'ouverture en quelques secondes.</div>';
-    $("s-diff").classList.add("hide");
+      '<div class="msg work">Aucun relevé en mémoire. Lancez une analyse '
+    + 'pour établir la situation de départ.</div>';
     showPicker();
     return;
   }
 
-  cartes    = { dossiers: etat.dossiers, docs: etat.docs };
-  deltaLink = etat.deltaLink;
+  cartes    = { dossiers: etat.dossiers, docs: etat.docs || {} };
   racineRef = etat.ref;
   racineNom = etat.racine;
-
-  let items;
-  try{ items = await lireDelta(deltaLink); }
-  catch(err){
-    $("diff-body").innerHTML = '<div class="msg err">' + escapeHtml(err.message) + '</div>';
-    return;
-  }
-
-  // Microsoft a invalidé le jeton : repli sur l'analyse complète
-  if(items === null){
-    $("diff-body").innerHTML =
-      '<div class="verdict dirty">Microsoft demande une remise à niveau '
-    + 'complète (le suivi des changements a été réinitialisé de son côté). '
-    + 'Lancez une analyse complète.</div>';
-    showPicker();
-    return;
-  }
-
-  let ch;
-  try{ ch = await appliquerDelta(items); }
-  catch(err){
-    $("diff-body").innerHTML = '<div class="msg err">' + escapeHtml(err.message)
-      + ' Lancez une analyse complète.</div>';
-    showPicker();
-    return;
-  }
 
   const quand = new Date(etat.date).toLocaleString("fr-BE",
     { day:"numeric", month:"long", year:"numeric", hour:"2-digit", minute:"2-digit" });
 
-  let html = "";
-  if(!ch.total){
-    html = '<div class="verdict clean">Aucun changement depuis le '
-         + escapeHtml(quand) + '.</div>';
-  }else{
-    html = '<div class="verdict dirty">' + ch.total
-         + ' changement(s) depuis le ' + escapeHtml(quand) + '.</div>';
+  $("diff-body").innerHTML =
+    '<div class="msg work">Situation relevée le ' + escapeHtml(quand) + '.'
+  + '<br>Pour savoir ce qui a changé depuis, lancez une analyse : '
+  + 'les ajouts et suppressions seront listés.</div>';
 
-    ch.ajDoc.forEach(x => {
-      html += '<div class="chg plus"><div class="quoi">+ Document ajouté</div>'
-            + '<div class="ou">' + escapeHtml(x.nom) + '<br>'
-            + escapeHtml(x.ou) + '</div></div>';
-    });
-    ch.suDoc.forEach(x => {
-      html += '<div class="chg moins"><div class="quoi">− Document supprimé</div>'
-            + '<div class="ou">' + escapeHtml(x.nom) + '<br>'
-            + escapeHtml(x.ou) + '</div></div>';
-    });
-    ch.ajPho.forEach(x => {
-      html += '<div class="chg plus"><div class="quoi">+ ' + x.nb
-            + (x.nb > 1 ? ' photos ajoutées' : ' photo ajoutée') + '</div>'
-            + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
-    });
-    ch.suPho.forEach(x => {
-      html += '<div class="chg moins"><div class="quoi">− ' + x.nb
-            + (x.nb > 1 ? ' photos supprimées' : ' photo supprimée') + '</div>'
-            + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
-    });
-    ch.ajDossier.forEach(p => {
-      html += '<div class="chg plus"><div class="quoi">+ Dossier créé</div>'
-            + '<div class="ou">' + escapeHtml(p) + '</div></div>';
-    });
-    ch.suDossier.forEach(p => {
-      html += '<div class="chg moins"><div class="quoi">− Dossier supprimé</div>'
-            + '<div class="ou">' + escapeHtml(p) + '</div></div>';
-    });
-  }
-  $("diff-body").innerHTML = html;
-
-  // contrôle des états des lieux + arborescence, à jour, sans relire OneDrive
+  // arborescence et contrôle des états des lieux, depuis la mémoire
   try{
     const arbre = arbreDepuisCartes(cartes);
-
     lines = [];
     lines.push(arbre.name + "/");
     emit(arbre, "");
-    stats = { folders:0, files:0, photos:0, deepest:0 };
+    stats = { folders:-1, files:0, photos:0, deepest:0 };
     Object.keys(cartes.dossiers).forEach(id => {
       stats.folders++;
       stats.photos += cartes.dossiers[id].photos || 0;
     });
-    stats.folders--;                       // la racine n'est pas un sous-dossier
     stats.files = Object.keys(cartes.docs).length;
     $("s-tree").classList.remove("hide");
     $("msg-area").innerHTML =
       '<div class="msg work" style="font-size:11px">Affiché depuis la mémoire '
     + 'de l\'application, sans relire OneDrive.</div>';
-    render("—");
-
+    render("\u2014");
     checkEDL(arbre);
   }catch(e){}
 
-  // mémoire mise à jour
-  if(ch.total){ try{ await ecrireEtat(etatCourant()); }catch(e){} }
-
   $("s-actions").classList.remove("hide");
+}
+
+/* Comparaison de deux mémoires, par identifiant d'élément.
+   Sert aux appareils où delta est indisponible (dossier partagé) :
+   l'analyse complète y remplace delta pour détecter les changements.
+   Comparer par identifiant, et non par chemin, évite de confondre
+   un déplacement avec une suppression suivie d'un ajout. */
+function comparerCartes(av, ap){
+  const ajDoc = [], suDoc = [], ajDossier = [], suDossier = [],
+        ajPho = [], suPho = [];
+
+  Object.keys(ap.docs).forEach(id => {
+    if(!av.docs[id]) ajDoc.push({ nom: ap.docs[id].nom,
+                                  ou: cheminDe(ap.docs[id].parent, ap) });
+  });
+  Object.keys(av.docs).forEach(id => {
+    if(!ap.docs[id]) suDoc.push({ nom: av.docs[id].nom,
+                                  ou: cheminDe(av.docs[id].parent, av) });
+  });
+  Object.keys(ap.dossiers).forEach(id => {
+    if(!av.dossiers[id]) ajDossier.push(cheminDe(id, ap));
+  });
+  Object.keys(av.dossiers).forEach(id => {
+    if(!ap.dossiers[id]) suDossier.push(cheminDe(id, av));
+  });
+  Object.keys(ap.dossiers).forEach(id => {
+    if(!av.dossiers[id]) return;
+    const n = ap.dossiers[id].photos || 0, v = av.dossiers[id].photos || 0;
+    if(n > v) ajPho.push({ nb:n - v, ou: cheminDe(id, ap) });
+    if(n < v) suPho.push({ nb:v - n, ou: cheminDe(id, ap) });
+  });
+
+  return { ajDoc, suDoc, ajDossier, suDossier, ajPho, suPho,
+           total: ajDoc.length + suDoc.length + ajDossier.length
+                + suDossier.length + ajPho.length + suPho.length };
+}
+
+/* Mise en forme commune aux deux moteurs */
+function htmlChangements(ch, quand){
+  if(!ch.total){
+    return '<div class="verdict clean">Aucun changement depuis le '
+         + escapeHtml(quand) + '.</div>';
+  }
+  let h = '<div class="verdict dirty">' + ch.total
+        + ' changement(s) depuis le ' + escapeHtml(quand) + '.</div>';
+  ch.ajDoc.forEach(x => {
+    h += '<div class="chg plus"><div class="quoi">+ Document ajouté</div>'
+       + '<div class="ou">' + escapeHtml(x.nom) + '<br>' + escapeHtml(x.ou) + '</div></div>';
+  });
+  ch.suDoc.forEach(x => {
+    h += '<div class="chg moins"><div class="quoi">− Document supprimé</div>'
+       + '<div class="ou">' + escapeHtml(x.nom) + '<br>' + escapeHtml(x.ou) + '</div></div>';
+  });
+  ch.ajPho.forEach(x => {
+    h += '<div class="chg plus"><div class="quoi">+ ' + x.nb
+       + (x.nb > 1 ? ' photos ajoutées' : ' photo ajoutée') + '</div>'
+       + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
+  });
+  ch.suPho.forEach(x => {
+    h += '<div class="chg moins"><div class="quoi">− ' + x.nb
+       + (x.nb > 1 ? ' photos supprimées' : ' photo supprimée') + '</div>'
+       + '<div class="ou">' + escapeHtml(x.ou) + '</div></div>';
+  });
+  ch.ajDossier.forEach(p => {
+    h += '<div class="chg plus"><div class="quoi">+ Dossier créé</div>'
+       + '<div class="ou">' + escapeHtml(p) + '</div></div>';
+  });
+  ch.suDossier.forEach(p => {
+    h += '<div class="chg moins"><div class="quoi">− Dossier supprimé</div>'
+       + '<div class="ou">' + escapeHtml(p) + '</div></div>';
+  });
+  return h;
 }
 
 /* ---------- copie ---------- */
