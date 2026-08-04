@@ -468,13 +468,41 @@ async function graph(path, attempt){
   return r.json();
 }
 
-async function childrenOf(itemId){
-  // $top élevé : Microsoft plafonne lui-même si nécessaire, mais cela
-  // réduit fortement le nombre d'appels dans les dossiers de photos.
-  const champs = "id,name,folder,lastModifiedDateTime";
-  let url = itemId
-    ? "/me/drive/items/" + itemId + "/children?$top=999&$select=" + champs
-    : "/me/drive/root/children?$top=999&$select=" + champs;
+/* Un raccourci vers un dossier partagé n'est pas un dossier ordinaire :
+   il pointe vers un autre espace de stockage (celui du propriétaire).
+   Ces deux fonctions permettent de le traiter comme n'importe quel dossier. */
+
+// vrai dossier, ou raccourci vers un dossier partagé
+function estDossier(it){
+  return !!(it.folder || (it.remoteItem && it.remoteItem.folder));
+}
+
+// coordonnées réelles de l'élément : son espace de stockage et son identifiant
+function refDe(it, driveParent){
+  if(it.remoteItem){
+    return {
+      driveId: (it.remoteItem.parentReference && it.remoteItem.parentReference.driveId)
+               || driveParent || null,
+      id: it.remoteItem.id
+    };
+  }
+  // à l'intérieur d'un dossier partagé, les sous-dossiers ne portent plus
+  // l'information du propriétaire : ils héritent de celle du parent, sans
+  // quoi l'application irait chercher dans le mauvais espace de stockage
+  return { driveId: driveParent || null, id: it.id };
+}
+
+async function childrenOf(ref){
+  const champs = "id,name,folder,remoteItem,lastModifiedDateTime";
+  let url;
+  if(!ref || !ref.id){
+    url = "/me/drive/root/children?$top=999&$select=" + champs;
+  }else if(ref.driveId){
+    url = "/drives/" + ref.driveId + "/items/" + ref.id
+        + "/children?$top=999&$select=" + champs;
+  }else{
+    url = "/me/drive/items/" + ref.id + "/children?$top=999&$select=" + champs;
+  }
   let all = [];
   while(url){
     const page = await graph(url);
@@ -499,7 +527,7 @@ async function showPicker(){
     $("who-name").textContent = me.userPrincipalName || me.displayName || "connecté";
 
     const items = await childrenOf(null);
-    const folders = items.filter(i => i.folder)
+    const folders = items.filter(estDossier)
                          .sort((a,b) => a.name.localeCompare(b.name,"fr"));
 
     if(!folders.length){
@@ -509,10 +537,15 @@ async function showPicker(){
 
     $("pick-list").innerHTML = "";
     folders.forEach(f => {
+      const partage = !!f.remoteItem;
+      const info = partage
+        ? (f.remoteItem.folder.childCount || 0)
+        : (f.folder.childCount || 0);
       const b = document.createElement("button");
       b.className = "pick";
       b.innerHTML = escapeHtml(f.name)
-        + '<span class="sub">' + (f.folder.childCount || 0) + ' élément(s)</span>';
+        + '<span class="sub">' + info + ' élément(s)'
+        + (partage ? ' &middot; dossier partagé' : '') + '</span>';
       b.onclick = () => scan(f);
       $("pick-list").appendChild(b);
     });
@@ -547,7 +580,7 @@ async function scan(root){
 
   try{
     await reperDossierApp();
-    const tree = { name: root.name, id: root.id, children: [],
+    const tree = { name: root.name, ref: refDe(root), children: [],
                    medias: 0, docs: [], depth: 1, path: root.name };
     await crawl(tree);
 
@@ -600,12 +633,12 @@ async function crawl(rootNode){
       const node = queue[taken++];
 
       let items = [];
-      try{ items = await childrenOf(node.id); }
+      try{ items = await childrenOf(node.ref); }
       catch(e){ items = []; }
 
-      const folders = items.filter(it => it.folder);
-      const docs    = items.filter(it => !it.folder && !MEDIA.test(it.name));
-      const medias  = items.filter(it => !it.folder && MEDIA.test(it.name));
+      const folders = items.filter(estDossier);
+      const docs    = items.filter(it => !estDossier(it) && !MEDIA.test(it.name));
+      const medias  = items.filter(it => !estDossier(it) && MEDIA.test(it.name));
 
       node.medias = medias.length;
       node.docs   = docs.map(d => d.name);
@@ -617,7 +650,7 @@ async function crawl(rootNode){
         folders.forEach(f => {
           // le dossier de l'application ne fait pas partie des documents
           // de gestion : on ne le compte pas et on n'y descend pas
-          if(dossierAppId && f.id === dossierAppId) return;
+          if(dossierAppId && refDe(f).id === dossierAppId) return;
 
           // filtre par année, appliqué au niveau du dossier de locataire
           if(filtreActif && node.depth + 1 === NIVEAU_LOCATAIRE){
@@ -627,7 +660,8 @@ async function crawl(rootNode){
           }
           stats.folders++;
           const child = {
-            name: f.name, id: f.id, children: [], medias: 0, docs: [],
+            name: f.name, ref: refDe(f, node.ref.driveId),
+            children: [], medias: 0, docs: [],
             depth: node.depth + 1,
             path: node.path + " / " + f.name
           };
