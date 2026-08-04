@@ -684,6 +684,11 @@ async function scan(root){
         + ". Rien n'est enregistré. Relancez.", "err");
       lines.push(root.name + "/"); emit(p1.tree, "");
       stats = p1.stats; render(Math.round((Date.now() - started)/1000));
+      $("s-diff").classList.remove("hide");
+      $("diff-body").innerHTML =
+        '<div class="verdict dirty">Analyse interrompue : ' + escapeHtml(p1.manque)
+      + '. Impossible de dire ce qui a changé. Rien n\'a été enregistré. '
+      + 'Relancez l\'analyse.</div>';
       return;
     }
 
@@ -696,6 +701,11 @@ async function scan(root){
         + ". Rien n'est enregistré. Relancez.", "err");
       lines.push(root.name + "/"); emit(p1.tree, "");
       stats = p1.stats; render(Math.round((Date.now() - started)/1000));
+      $("s-diff").classList.remove("hide");
+      $("diff-body").innerHTML =
+        '<div class="verdict dirty">Vérification interrompue : ' + escapeHtml(p2.manque)
+      + '. Impossible de dire ce qui a changé. Rien n\'a été enregistré. '
+      + 'Relancez l\'analyse.</div>';
       return;
     }
 
@@ -716,6 +726,11 @@ async function scan(root){
         h += '<div class="msg err" style="font-size:11px">' + escapeHtml(e) + '</div>';
       });
       $("msg-area").innerHTML = h;
+      $("s-diff").classList.remove("hide");
+      $("diff-body").innerHTML =
+        '<div class="verdict dirty">Les deux passages ne concordent pas. '
+      + 'Impossible de dire ce qui a changé. Rien n\'a été enregistré. '
+      + 'Relancez l\'analyse.</div>';
       render(Math.round((Date.now() - started) / 1000));
       $("s-actions").classList.remove("hide");
       return;
@@ -1014,10 +1029,13 @@ async function lireEtat(){
   if(r.status === 404) return null;
   if(!r.ok) throw new Error("Lecture de l'état impossible (" + r.status + ")");
   // un fichier tronqué ou abîmé ne doit pas bloquer l'application :
-  // on le traite comme une absence d'état plutôt que de planter
+  // on le traite comme une absence d'état plutôt que de planter.
+  // Le relevé est valable s'il contient la carte des dossiers.
   try{
     const d = await r.json();
-    return (d && d.documents) ? d : null;
+    if(!d) return null;
+    if(d.dossiers && Object.keys(d.dossiers).length) return d;
+    return null;
   }catch(e){ return null; }
 }
 
@@ -1057,35 +1075,6 @@ function inventaire(node, doc, pho){
     else doc[node.path + " / " + k.name] = 1;
   });
   return { documents: doc, photos: pho };
-}
-
-/* Comparaison avec l'analyse précédente */
-function comparer(avant, apres){
-  const ajDoc = [], suDoc = [], ajPho = [], suPho = [];
-
-  // le fichier d'état de l'application n'est pas un document de gestion :
-  // il est ignoré, y compris s'il figure dans un état enregistré autrefois
-  const propre = p => !p.endsWith("veros-etat.json");
-
-  Object.keys(apres.documents).filter(propre).forEach(p => {
-    if(!avant.documents[p]) ajDoc.push(p);
-  });
-  Object.keys(avant.documents).filter(propre).forEach(p => {
-    if(!apres.documents[p]) suDoc.push(p);
-  });
-
-  const dossiers = new Set(
-    Object.keys(apres.photos).concat(Object.keys(avant.photos))
-  );
-  dossiers.forEach(d => {
-    const n = apres.photos[d] || 0;
-    const v = avant.photos[d] || 0;
-    if(n > v) ajPho.push({ dossier:d, nb:n - v });
-    if(n < v) suPho.push({ dossier:d, nb:v - n });
-  });
-
-  return { ajDoc, suDoc, ajPho, suPho,
-           total: ajDoc.length + suDoc.length + ajPho.length + suPho.length };
 }
 
 /* Une analyse n'est fiable que si TOUS les dossiers de la file ont été
