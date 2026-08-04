@@ -151,9 +151,10 @@ button.go{background:var(--signal)}
   max-height:60vh;
   overflow-y:auto;
 }
-.tree .f{color:#F0C674}      /* dossier */
-.tree .d{color:#9BB3C7}      /* document */
-.tree .n{color:#5C7085}      /* traits */
+.tree .f{color:#F0C674}                  /* dossier */
+.tree .d{color:#9BB3C7}                  /* document */
+.tree .n{color:#5C7085}                  /* traits */
+.tree .m{color:#6B8299; font-style:italic} /* photos regroupées */
 
 /* ---------- compteurs ---------- */
 .stats{
@@ -244,8 +245,13 @@ const AUTHORITY  = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const SCOPES     = "Files.Read User.Read offline_access";
 const GRAPH      = "https://graph.microsoft.com/v1.0";
 
-const MAX_DEPTH = 8;      // profondeur maximale explorée
-const MAX_ITEMS = 6000;   // garde-fou anti-emballement
+const MAX_DEPTH = 10;     // profondeur maximale explorée
+const MAX_ITEMS = 20000;  // garde-fou anti-emballement
+
+/* Les photos et vidéos sont comptées mais pas listées une par une :
+   un dossier d'état des lieux contient des dizaines de clichés sans
+   intérêt pour vérifier quels documents sont présents. */
+const MEDIA = /\.(jpe?g|png|heic|heif|gif|bmp|tiff?|webp|mov|mp4|avi|m4v|3gp|aae)$/i;
 
 const $ = id => document.getElementById(id);
 
@@ -393,7 +399,7 @@ async function scan(root){
   $("stats").innerHTML = "";
   $("tree").textContent = "";
 
-  stats = { folders:0, files:0, deepest:0 };
+  stats = { folders:0, files:0, photos:0, deepest:0 };
   lines = [];
   stopped = false;
 
@@ -420,14 +426,21 @@ async function walk(id, depth, prefix){
 
   const items = await childrenOf(id);
   const folders = items.filter(i => i.folder).sort((a,b)=>a.name.localeCompare(b.name,"fr"));
-  const files   = items.filter(i => !i.folder).sort((a,b)=>a.name.localeCompare(b.name,"fr"));
-  const ordered = folders.concat(files);
+  const docs    = items.filter(i => !i.folder && !MEDIA.test(i.name))
+                       .sort((a,b)=>a.name.localeCompare(b.name,"fr"));
+  const medias  = items.filter(i => !i.folder && MEDIA.test(i.name));
+
+  stats.photos += medias.length;
+
+  // les photos sont résumées en une seule ligne, placée en dernier
+  const ordered = folders.concat(docs);
+  const total   = ordered.length + (medias.length ? 1 : 0);
 
   for(let k=0; k<ordered.length; k++){
     if(stats.folders + stats.files >= MAX_ITEMS){ stopped = true; return; }
 
     const it   = ordered[k];
-    const last = (k === ordered.length - 1);
+    const last = (k === total - 1);
     const branch = last ? "└─ " : "├─ ";
 
     if(it.folder){
@@ -443,18 +456,24 @@ async function walk(id, depth, prefix){
       say("Analyse en cours… " + (stats.folders + stats.files) + " éléments lus.");
     }
   }
+
+  if(medias.length){
+    lines.push(prefix + "└─ (" + medias.length
+      + (medias.length > 1 ? " photos ou vidéos)" : " photo ou vidéo)"));
+  }
 }
 
 function render(){
   $("stats").innerHTML =
      '<div class="stat"><b>'+stats.folders+'</b><span>Dossiers</span></div>'
    + '<div class="stat"><b>'+stats.files+'</b><span>Documents</span></div>'
+   + '<div class="stat"><b>'+stats.photos+'</b><span>Photos</span></div>'
    + '<div class="stat"><b>'+stats.deepest+'</b><span>Niveaux</span></div>';
 
   const html = lines.map(l => {
     const draw = l.match(/^[\s│├└─]*/)[0];
     const name = l.slice(draw.length);
-    const cls  = name.endsWith("/") ? "f" : "d";
+    const cls  = name.startsWith("(") ? "m" : (name.endsWith("/") ? "f" : "d");
     return '<span class="n">'+escapeHtml(draw)+'</span><span class="'+cls+'">'+escapeHtml(name)+'</span>';
   }).join("\n");
 
