@@ -669,7 +669,11 @@ async function scan(root){
   netCalls = 0; netThrottled = 0; netWaitMs = 0;
 
   const started = Date.now();
-  say("Analyse en cours… (1er passage sur 2)");
+  const ecranTenu = await garderEcranAllume();
+  say(ecranTenu
+    ? "Analyse en cours… (1er passage sur 2)<br>L'écran restera allumé jusqu'à la fin."
+    : "Analyse en cours… (1er passage sur 2)<br>Laissez l'écran allumé : "
+      + "votre iPhone ne permet pas de le maintenir automatiquement.");
 
   try{
     await reperDossierApp();
@@ -759,6 +763,8 @@ async function scan(root){
     $("s-actions").classList.remove("hide");
   }catch(err){
     say(escapeHtml(err.message), "err");
+  }finally{
+    libererEcran();
   }
 }
 
@@ -1126,6 +1132,8 @@ async function detecterChangements(tree, nomRacine){
   // ---------- diagnostic : les faits bruts, sans interprétation ----------
   const nD = Object.keys(nouvelles.dossiers).length;
   const nF = Object.keys(nouvelles.docs).length;
+  const nP = Object.keys(nouvelles.dossiers)
+                   .reduce((s,id) => s + (nouvelles.dossiers[id].photos || 0), 0);
   let diag = '<div class="msg work" style="font-size:11px;line-height:1.7">'
            + '<b>DIAGNOSTIC</b><br>';
   if(lectureErreur){
@@ -1135,15 +1143,32 @@ async function detecterChangements(tree, nomRacine){
   }else{
     const aD = Object.keys(avant.dossiers || {}).length;
     const aF = Object.keys(avant.docs || {}).length;
+    const aP = Object.keys(avant.dossiers || {})
+                     .reduce((s,id) => s + (avant.dossiers[id].photos || 0), 0);
     diag += 'Fichier mémoire : trouvé, écrit le '
           + escapeHtml(new Date(avant.date).toLocaleString("fr-BE")) + '<br>'
-          + '&nbsp;&nbsp;il contient ' + aD + ' dossiers et ' + aF + ' documents<br>';
+          + '&nbsp;&nbsp;' + aD + ' dossiers, ' + aF + ' documents, '
+          + aP + ' photos<br>';
     // combien d'identifiants sont communs aux deux relevés ?
     let communsD = 0, communsF = 0;
     Object.keys(nouvelles.dossiers).forEach(id => { if((avant.dossiers||{})[id]) communsD++; });
     Object.keys(nouvelles.docs).forEach(id => { if((avant.docs||{})[id]) communsF++; });
     diag += 'Identifiants communs aux deux relevés : '
           + communsD + ' dossiers, ' + communsF + ' documents<br>';
+
+    // dossiers dont le nombre de photos a bougé
+    let bouges = 0, exemple = "";
+    Object.keys(nouvelles.dossiers).forEach(id => {
+      const av2 = (avant.dossiers || {})[id];
+      if(!av2) return;
+      const n = nouvelles.dossiers[id].photos || 0, v = av2.photos || 0;
+      if(n !== v){
+        bouges++;
+        if(!exemple) exemple = nouvelles.dossiers[id].nom + " : " + v + " puis " + n;
+      }
+    });
+    diag += 'Dossiers dont le nombre de photos a changé : ' + bouges
+          + (exemple ? ' (' + escapeHtml(exemple) + ')' : '') + '<br>';
     if(communsD === 0 && aD > 0){
       diag += '<b>ANOMALIE : aucun identifiant commun. Les identifiants '
             + 'changent d\'une analyse à l\'autre — la comparaison est '
@@ -1154,7 +1179,8 @@ async function detecterChangements(tree, nomRacine){
             + 'exemple relevé&nbsp;&nbsp;&nbsp;: ' + escapeHtml(ex2) + '<br>';
     }
   }
-  diag += 'Analyse de maintenant : ' + nD + ' dossiers et ' + nF + ' documents<br>'
+  diag += 'Analyse de maintenant : ' + nD + ' dossiers, ' + nF + ' documents, '
+        + nP + ' photos<br>'
         + 'Emplacement : dossier réservé à l\'application<br>'
         + '</div>';
 
@@ -1406,6 +1432,31 @@ function htmlChangements(ch, quand){
   });
   return h;
 }
+
+/* ---------- empêcher l'écran de s'éteindre pendant l'analyse ----------
+   iOS met le navigateur en veille dès que l'écran s'éteint, ce qui
+   interrompt l'analyse. Cette fonction demande à l'iPhone de garder
+   l'écran allumé, et uniquement le temps de l'analyse. */
+let veille = null;
+
+async function garderEcranAllume(){
+  try{
+    if(!navigator.wakeLock) return false;
+    veille = await navigator.wakeLock.request("screen");
+    return true;
+  }catch(e){ veille = null; return false; }
+}
+
+function libererEcran(){
+  try{ if(veille){ veille.release(); veille = null; } }catch(e){}
+}
+
+// si l'utilisateur revient sur l'application, on redemande le maintien
+document.addEventListener("visibilitychange", async () => {
+  if(veille !== null && document.visibilityState === "visible"){
+    try{ veille = await navigator.wakeLock.request("screen"); }catch(e){}
+  }
+});
 
 /* ---------- copie ---------- */
 function reportText(){
