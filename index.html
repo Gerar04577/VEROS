@@ -248,6 +248,74 @@ button.go{background:var(--signal)}
   word-break:break-word;
 }
 
+/* ---------- recherche par locataire ---------- */
+.chercher{
+  position:relative;
+  margin-bottom:14px;
+}
+.chercher input{
+  width:100%;
+  font-family:var(--sans);
+  font-size:16px;
+  padding:14px;
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--card);
+  color:var(--ink);
+}
+.chercher input:focus{ outline:2px solid var(--signal); outline-offset:1px; }
+.suggestions{
+  border:1px solid var(--line);
+  border-top:none;
+  border-radius:0 0 8px 8px;
+  max-height:280px;
+  overflow-y:auto;
+  background:var(--card);
+}
+.suggestions button{
+  width:100%;
+  text-align:left;
+  background:none;
+  border:none;
+  border-bottom:1px solid var(--line);
+  border-radius:0;
+  padding:13px 14px;
+  margin:0;
+  font-size:15px;
+  font-weight:500;
+  color:var(--ink);
+}
+.suggestions button:last-child{ border-bottom:none; }
+.suggestions .lieu{
+  display:block;
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--mist);
+  font-weight:400;
+  margin-top:3px;
+}
+.choisi{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  background:var(--ink);
+  color:#fff;
+  border-radius:8px;
+  padding:12px 14px;
+  margin-bottom:14px;
+  font-size:15px;
+  font-weight:600;
+}
+.choisi button{
+  width:auto;
+  margin:0;
+  padding:8px 12px;
+  font-size:13px;
+  background:rgba(255,255,255,.15);
+  color:#fff;
+}
+
 /* ---------- journal des changements ---------- */
 .releve{
   border:1px solid var(--line);
@@ -358,6 +426,7 @@ button.go{background:var(--signal)}
   <section id="s-actions" class="hide">
     <button class="go" id="btn-again">Lancer une analyse complète</button>
     <button class="ghost" id="btn-journal">Consulter les changements</button>
+    <button class="ghost" id="btn-recherche">Recherche changements par locataire</button>
     <button class="ghost" id="btn-report">Copier les anomalies EDLE/EDLS</button>
     <button class="ghost" id="btn-copy">Copier l'architecture</button>
     <button class="ghost" id="btn-logout2">Se déconnecter</button>
@@ -1699,6 +1768,145 @@ async function afficherJournal(){
   });
 }
 
+/* =========================================================
+   RECHERCHE PAR LOCATAIRE
+   Le locataire est l'avant-dernier segment d'un chemin :
+   … / Biche / APPARTEMENT / Lucie Cransquint / EDLS
+   La comparaison ignore la casse et les accents.
+   ========================================================= */
+
+let locataireChoisi = null;
+
+// "Théo PASCALI" et "Théo Pascali" donnent la même forme comparable
+function aplatir(t){
+  return String(t)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().trim();
+}
+
+/* Liste de tous les locataires, tirée de la mémoire complète.
+   Un locataire est un dossier dont un enfant s'appelle Bail, EDLE,
+   EDLS, ou tout autre dossier de type de document. */
+function listeLocataires(){
+  if(!cartes || !cartes.dossiers) return [];
+  const TYPES = /^(bail|edle|edls|annexe|documents? annexes?|pret meubles|prêt meubles|samadhi)/i;
+  const parents = {};
+  Object.keys(cartes.dossiers).forEach(id => {
+    const d = cartes.dossiers[id];
+    if(!d.parent) return;
+    const nom = d.nom.trim();
+    const estType = TYPES.test(aplatir(nom).replace(/[-_]/g, " "))
+                 || /^edl/i.test(aplatir(nom).replace(/[\s._-]/g, ""));
+    if(estType) parents[d.parent] = true;
+  });
+
+  const out = [];
+  Object.keys(parents).forEach(id => {
+    const d = cartes.dossiers[id];
+    if(!d) return;
+    out.push({ id: id, nom: d.nom, lieu: cheminDe(d.parent, cartes) });
+  });
+  out.sort((a,b) => a.nom.localeCompare(b.nom, "fr"));
+  return out;
+}
+
+/* Un relevé concerne-t-il ce locataire ? On cherche son nom
+   comme segment de chemin dans les lignes du relevé. */
+function releveConcerne(releve, nomLocataire){
+  const cible = aplatir(nomLocataire);
+  return (releve.lignes || []).some(l => {
+    const bouts = aplatir(l).split(" / ");
+    return bouts.some(b => b.trim() === cible);
+  });
+}
+
+async function ecranRecherche(){
+  $("s-journal").classList.remove("hide");
+  locataireChoisi = null;
+
+  const tous = listeLocataires();
+  if(!tous.length){
+    $("journal-body").innerHTML =
+      '<div class="msg work">Aucun locataire connu. Lancez d\'abord une '
+    + 'analyse complète.</div>';
+    return;
+  }
+
+  $("journal-body").innerHTML =
+      '<div class="chercher">'
+    + '<input id="champ-loc" type="search" autocomplete="off" '
+    + 'placeholder="Premières lettres du nom du locataire…">'
+    + '<div class="suggestions" id="suggestions"></div>'
+    + '</div>'
+    + '<div id="resultats-loc"></div>';
+
+  const champ = $("champ-loc");
+  const boite = $("suggestions");
+
+  function proposer(){
+    const q = aplatir(champ.value);
+    if(!q){ boite.innerHTML = ""; return; }
+    const trouves = tous.filter(l => aplatir(l.nom).includes(q)).slice(0, 30);
+    if(!trouves.length){
+      boite.innerHTML = '<div class="ligne" style="padding:12px 14px">'
+                      + 'Aucun locataire de ce nom.</div>';
+      return;
+    }
+    boite.innerHTML = trouves.map(l =>
+        '<button data-nom="' + escapeHtml(l.nom) + '">' + escapeHtml(l.nom)
+      + '<span class="lieu">' + escapeHtml(l.lieu) + '</span></button>').join("");
+    Array.prototype.forEach.call(boite.querySelectorAll("button"), b => {
+      b.onclick = () => choisirLocataire(b.getAttribute("data-nom"));
+    });
+  }
+
+  champ.oninput = proposer;
+  champ.onfocus = proposer;
+  if(champ.focus) champ.focus();
+}
+
+async function choisirLocataire(nom){
+  locataireChoisi = nom;
+  $("suggestions").innerHTML = "";
+  $("champ-loc").value = nom;
+  const zone = $("resultats-loc");
+  zone.innerHTML = '<div class="msg work">Recherche…</div>';
+
+  const j = await lireJournal();
+  const concernes = j.releves.filter(r => releveConcerne(r, nom)).reverse();
+
+  let html = '<div class="choisi"><span>' + escapeHtml(nom) + '</span>'
+           + '<button id="btn-vider">Effacer</button></div>';
+
+  if(!concernes.length){
+    html += '<div class="verdict clean">Aucun changement enregistré pour '
+          + 'ce locataire.</div>';
+  }else{
+    html += '<div class="verdict dirty">' + concernes.length
+          + ' relevé(s) concernant ce locataire.</div>';
+    concernes.forEach(r => {
+      html += '<div class="releve' + (r.controle ? ' fait' : '') + '">'
+            + '<div class="quand">' + escapeHtml(dateLisible(r.date)) + '</div>';
+      r.lignes.forEach(l => { html += '<div class="ligne">' + escapeHtml(l) + '</div>'; });
+      html += r.controle
+        ? '<div class="vu">✓ Contrôlé le ' + escapeHtml(dateLisible(r.controle)) + '</div>'
+        : '<button class="go" data-id="' + escapeHtml(r.id) + '">Marquer comme contrôlé</button>';
+      html += '</div>';
+    });
+  }
+  zone.innerHTML = html;
+
+  const vider = $("btn-vider");
+  if(vider) vider.onclick = () => { $("champ-loc").value = ""; ecranRecherche(); };
+
+  Array.prototype.forEach.call(zone.querySelectorAll("button[data-id]"), b => {
+    b.onclick = async () => {
+      await marquerControle(b.getAttribute("data-id"), b);
+      choisirLocataire(nom);
+    };
+  });
+}
+
 /* ---------- copie ---------- */
 function reportText(){
   if(!edlReport || !edlReport.total) return "Aucun dossier EDLE / EDLS trouvé.";
@@ -1747,6 +1955,7 @@ async function copyTree(){
   $("btn-report").onclick = () => copyText(reportText(), $("btn-report"), "Anomalies copiées");
   $("btn-again").onclick  = showPicker;
   $("btn-journal").onclick= afficherJournal;
+  $("btn-recherche").onclick = ecranRecherche;
 
   const params = new URLSearchParams(location.search);
 
