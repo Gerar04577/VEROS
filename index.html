@@ -1120,8 +1120,43 @@ async function detecterChangements(tree, nomRacine){
   const nouvelles = cartesDepuisArbre(tree);
 
   // état précédent, s'il existe
-  let avant = null;
-  try{ avant = await lireEtat(); }catch(e){ avant = null; }
+  let avant = null, lectureErreur = null;
+  try{ avant = await lireEtat(); }catch(e){ avant = null; lectureErreur = e.message; }
+
+  // ---------- diagnostic : les faits bruts, sans interprétation ----------
+  const nD = Object.keys(nouvelles.dossiers).length;
+  const nF = Object.keys(nouvelles.docs).length;
+  let diag = '<div class="msg work" style="font-size:11px;line-height:1.7">'
+           + '<b>DIAGNOSTIC</b><br>';
+  if(lectureErreur){
+    diag += 'Lecture du fichier mémoire : ÉCHEC — ' + escapeHtml(lectureErreur) + '<br>';
+  }else if(!avant){
+    diag += 'Fichier mémoire : ABSENT ou refusé<br>';
+  }else{
+    const aD = Object.keys(avant.dossiers || {}).length;
+    const aF = Object.keys(avant.docs || {}).length;
+    diag += 'Fichier mémoire : trouvé, écrit le '
+          + escapeHtml(new Date(avant.date).toLocaleString("fr-BE")) + '<br>'
+          + '&nbsp;&nbsp;il contient ' + aD + ' dossiers et ' + aF + ' documents<br>';
+    // combien d'identifiants sont communs aux deux relevés ?
+    let communsD = 0, communsF = 0;
+    Object.keys(nouvelles.dossiers).forEach(id => { if((avant.dossiers||{})[id]) communsD++; });
+    Object.keys(nouvelles.docs).forEach(id => { if((avant.docs||{})[id]) communsF++; });
+    diag += 'Identifiants communs aux deux relevés : '
+          + communsD + ' dossiers, ' + communsF + ' documents<br>';
+    if(communsD === 0 && aD > 0){
+      diag += '<b>ANOMALIE : aucun identifiant commun. Les identifiants '
+            + 'changent d\'une analyse à l\'autre — la comparaison est '
+            + 'impossible sur cette base.</b><br>';
+      const ex1 = Object.keys(avant.dossiers)[0] || "";
+      const ex2 = Object.keys(nouvelles.dossiers)[0] || "";
+      diag += 'exemple mémorisé : ' + escapeHtml(ex1) + '<br>'
+            + 'exemple relevé&nbsp;&nbsp;&nbsp;: ' + escapeHtml(ex2) + '<br>';
+    }
+  }
+  diag += 'Analyse de maintenant : ' + nD + ' dossiers et ' + nF + ' documents<br>'
+        + 'Emplacement : dossier réservé à l\'application<br>'
+        + '</div>';
 
   let html;
   if(avant && avant.dossiers && Object.keys(avant.dossiers).length){
@@ -1138,13 +1173,18 @@ async function detecterChangements(tree, nomRacine){
   }
 
   cartes = nouvelles;
+  let ecriture = "réussie";
   try{
     await ecrireEtat(etatCourant(nomRacine));
   }catch(err){
+    ecriture = "ÉCHEC — " + err.message;
     html += '<div class="msg err">Changements affichés, mais l\'état n\'a pas '
           + 'pu être enregistré : ' + escapeHtml(err.message) + '</div>';
   }
-  $("diff-body").innerHTML = html;
+  diag = diag.replace('</div>',
+    'Écriture du nouveau relevé : ' + escapeHtml(ecriture) + '</div>');
+
+  $("diff-body").innerHTML = html + diag;
 }
 
 function etatCourant(nom){
