@@ -358,7 +358,7 @@ button.go{background:var(--signal)}
   <section id="s-actions" class="hide">
     <button class="go" id="btn-again">Lancer une analyse complète</button>
     <button class="ghost" id="btn-journal">Consulter les changements</button>
-    <button class="ghost" id="btn-report">Copier la liste à compléter</button>
+    <button class="ghost" id="btn-report">Copier les anomalies EDLE/EDLS</button>
     <button class="ghost" id="btn-copy">Copier l'architecture</button>
     <button class="ghost" id="btn-logout2">Se déconnecter</button>
   </section>
@@ -1744,7 +1744,7 @@ async function copyTree(){
   $("btn-logout").onclick = forget;
   $("btn-logout2").onclick= forget;
   $("btn-copy").onclick   = copyTree;
-  $("btn-report").onclick = () => copyText(reportText(), $("btn-report"), "Liste copiée");
+  $("btn-report").onclick = () => copyText(reportText(), $("btn-report"), "Anomalies copiées");
   $("btn-again").onclick  = showPicker;
   $("btn-journal").onclick= afficherJournal;
 
