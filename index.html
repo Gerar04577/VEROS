@@ -248,6 +248,37 @@ button.go{background:var(--signal)}
   word-break:break-word;
 }
 
+/* ---------- avertissement pendant l'analyse ---------- */
+.alerte{
+  background:#B4131A;
+  color:#fff;
+  border-radius:10px;
+  padding:18px 16px;
+  margin-bottom:14px;
+  text-align:center;
+}
+.alerte .grand{
+  display:block;
+  font-size:20px;
+  font-weight:800;
+  line-height:1.25;
+  letter-spacing:.01em;
+  margin-bottom:8px;
+}
+.alerte .petit{
+  display:block;
+  font-size:14px;
+  line-height:1.45;
+  opacity:.95;
+}
+.alerte .compte{
+  display:block;
+  font-family:var(--mono);
+  font-size:12px;
+  margin-top:10px;
+  opacity:.85;
+}
+
 /* ---------- messages a l'ecran ---------- */
 .msg{
   font-family:var(--mono);
@@ -295,18 +326,18 @@ button.go{background:var(--signal)}
     <button class="ghost" id="btn-logout2">Se déconnecter</button>
   </section>
 
+  <!-- ETAPE 3bis : changements depuis la derniere analyse -->
+  <section id="s-diff" class="hide">
+    <h2>Depuis la dernière analyse</h2>
+    <div id="diff-body"></div>
+  </section>
+
   <!-- ETAPE 3 : resultat -->
   <section id="s-tree" class="hide">
     <h2>Architecture</h2>
     <div id="msg-area"></div>
     <div class="stats" id="stats"></div>
     <pre class="tree" id="tree"></pre>
-  </section>
-
-  <!-- ETAPE 3bis : changements depuis la derniere analyse -->
-  <section id="s-diff" class="hide">
-    <h2>Depuis la dernière analyse</h2>
-    <div id="diff-body"></div>
   </section>
 
   <!-- ETAPE 4 : controle des etats des lieux -->
@@ -389,6 +420,18 @@ async function challengeFrom(verifier){
 }
 
 /* ---------- messages ---------- */
+/* Avertissement bien visible pendant toute la durée de l'analyse :
+   quitter l'application la met en veille et l'interrompt. */
+function alerteAnalyse(avancement){
+  $("msg-area").innerHTML =
+      '<div class="alerte">'
+    + '<span class="grand">⚠️ NE QUITTEZ PAS CET ÉCRAN</span>'
+    + '<span class="petit">Analyse en cours. Si vous passez à une autre '
+    + 'application, l\'iPhone la met en veille et l\'analyse s\'arrête.</span>'
+    + '<span class="compte">' + escapeHtml(avancement) + '</span>'
+    + '</div>';
+}
+
 function say(text, kind){
   $("msg-area").innerHTML = '<div class="msg '+(kind||"work")+'">'+text+'</div>';
 }
@@ -671,10 +714,10 @@ async function scan(root){
 
   const started = Date.now();
   const ecranTenu = await garderEcranAllume();
-  say(ecranTenu
-    ? "Analyse en cours… (1er passage sur 2)<br>L'écran restera allumé jusqu'à la fin."
-    : "Analyse en cours… (1er passage sur 2)<br>Laissez l'écran allumé : "
-      + "votre iPhone ne permet pas de le maintenir automatiquement.");
+  $("s-tree").classList.remove("hide");
+  alerteAnalyse(ecranTenu
+    ? "Passage 1 sur 2 — démarrage… · l'écran restera allumé"
+    : "Passage 1 sur 2 — démarrage… · maintenez l'écran allumé");
 
   try{
     await reperDossierApp();
@@ -697,7 +740,7 @@ async function scan(root){
       return;
     }
 
-    say("Vérification en cours… (2e passage sur 2)");
+    alerteAnalyse("Passage 2 sur 2 — démarrage…");
     passage = 2;
     const p2 = await unPassage(root);
     if(p2.manque){
@@ -851,11 +894,9 @@ async function crawl(rootNode){
 
       done++;
       if(done % 10 === 0){
-        say("Passage " + passage + " sur 2 — " + done + " / " + queue.length
-            + " dossiers, " + stats.files + " documents"
-            + (netThrottled ? " (" + netThrottled + " ralentissements)" : "")
-            + "<br>Laissez cet écran affiché : iOS met l'analyse en veille "
-            + "si vous passez à une autre application.");
+        alerteAnalyse("Passage " + passage + " sur 2 — " + done + " / "
+          + queue.length + " dossiers, " + stats.files + " documents"
+          + (netThrottled ? " · " + netThrottled + " ralentissements" : ""));
       }
     }
   }
