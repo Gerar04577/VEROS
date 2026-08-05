@@ -287,6 +287,14 @@ button.go{background:var(--signal)}
     <button class="ghost" id="btn-logout">Se déconnecter</button>
   </section>
 
+  <!-- Boutons, regroupés en tête pour rester accessibles -->
+  <section id="s-actions" class="hide">
+    <button class="go" id="btn-again">Lancer une analyse complète</button>
+    <button class="ghost" id="btn-report">Copier la liste à compléter</button>
+    <button class="ghost" id="btn-copy">Copier l'architecture</button>
+    <button class="ghost" id="btn-logout2">Se déconnecter</button>
+  </section>
+
   <!-- ETAPE 3 : resultat -->
   <section id="s-tree" class="hide">
     <h2>Architecture</h2>
@@ -305,13 +313,6 @@ button.go{background:var(--signal)}
   <section id="s-check" class="hide">
     <h2>Contrôle des états des lieux</h2>
     <div id="check-body"></div>
-  </section>
-
-  <section id="s-actions" class="hide">
-    <button class="go" id="btn-report">Copier la liste à compléter</button>
-    <button class="ghost" id="btn-copy">Copier l'architecture</button>
-    <button class="ghost" id="btn-again">Lancer une analyse complète</button>
-    <button class="ghost" id="btn-logout2">Se déconnecter</button>
   </section>
 
 </main>
@@ -761,7 +762,7 @@ async function scan(root){
     checkEDL(p2.tree);
     await detecterChangements(p2.tree, root.name);
     $("s-actions").classList.remove("hide");
-  }catch(err){
+    }catch(err){
     say(escapeHtml(err.message), "err");
   }finally{
     libererEcran();
